@@ -19,6 +19,8 @@ namespace WorkrsBackend
         readonly ISharedResourceHandler _dataAccessHandler;
         readonly FTPHandler _ftpHandler;
         Dictionary<Guid, TaskInProgress> _tasks = new();
+        Dictionary<Guid, DateTime> _workerKeepAlive = new();
+        object _lock = new object();
 
         public ServiceLogic(IServerConfig serverConfig, ISharedResourceHandler dataAccessHandler, IRabbitMQHandler rabbitMQHandler)
         {
@@ -70,7 +72,7 @@ namespace WorkrsBackend
             {
                 _dataAccessHandler.AddClientToClientDHT(new Client(Guid.NewGuid(),"test", "P1", "P1"));
                 Client? c =_dataAccessHandler.FindClientByUserName("test");
-                if(c != null) 
+                if(c != null)
                 {
                     ServiceTask st = new ServiceTask(Guid.NewGuid(), c.ClientId, "myTestTask", ServiceTaskStatus.Created, "p1.source", "p1.backup", "p1.result" );
                     _dataAccessHandler.AddTask(st);
@@ -79,6 +81,7 @@ namespace WorkrsBackend
                 }
                 test = false;
             }
+            CheckKeepAliveForWorkers(_dataAccessHandler.GetMyWorkers(), 11);
 
             HandleStartTasks();
             HandleInProgressTasks();
@@ -86,8 +89,52 @@ namespace WorkrsBackend
             Log.Debug("Update alive");
             //var t = _dataAccessHandler.GetTaskFromId(Guid.Parse("1EA20BB4-A25B-4507-928C-E1C5C860B18E"));
             //var t1 = _dataAccessHandler.GetTaskForClient(Guid.Parse("91AD37D3-4057-486E-9005-CE296E7552FB"));
+        }
 
+        void CheckKeepAliveForWorkers(List<Worker> workers, int secondsMax)
+        {
+            Dictionary<Guid, DateTime> local = new Dictionary<Guid, DateTime>();
+            lock (_lock)
+            {
+                foreach (KeyValuePair<Guid, DateTime> keyValuePair in _workerKeepAlive)
+                {
+                    if (DateTime.UtcNow - keyValuePair.Value < new TimeSpan(0, 0, secondsMax))
+                        local.Add(keyValuePair.Key, keyValuePair.Value);
+                }
+            }
 
+            foreach(Worker worker in workers)
+            {
+                if(!local.ContainsKey(worker.WorkerId) && worker.Status != WorkerStatus.MIA)
+                {
+                    worker.Status = WorkerStatus.MIA;
+                    _dataAccessHandler.UpdateWorkerDHT(worker);
+
+                    var val = _tasks.Where(t => t.Value.Worker?.WorkerId == worker.WorkerId).FirstOrDefault();
+                    if(val.Value != null)
+                    {
+                        _tasks[val.Key].Worker = null;
+                    }
+                    Log.Debug($"CheckKeepAliveForWorkers: Worker {worker.WorkerId} MIA");
+                }
+                else if(local.ContainsKey(worker.WorkerId) && worker.Status == WorkerStatus.MIA)
+                {
+                    ResetWorkerAvailable(worker);
+                    Log.Debug($"CheckKeepAliveForWorkers: Worker {worker.WorkerId} Available");
+                }
+            }
+        }
+
+        void UpdateWorkerKeerpAlive(Worker worker)
+        {
+            lock(_lock)
+            {
+                Log.Debug($"UpdateWorkerKeerpAlive: {worker.WorkerId}");
+                if (_workerKeepAlive.ContainsKey(worker.WorkerId))
+                    _workerKeepAlive[worker.WorkerId] = DateTime.UtcNow;
+                else
+                    _workerKeepAlive.Add(worker.WorkerId, DateTime.UtcNow);
+            }
         }
 
         void HandleStartTasks()
@@ -104,8 +151,25 @@ namespace WorkrsBackend
         void HandleInProgressTasks()
         {
             var jobs = _dataAccessHandler.GetTasksFromStatus(ServiceTaskStatus.InProgress);
+            foreach (var job in jobs)
+            {
+                if (_tasks.ContainsKey(job.Id))
+                {
+                    if (_tasks[job.Id].Worker == null)
+                    {
+                        RecoverJob(job);
+                        Log.Debug($"HandleInProgressTasks, job recover: {job.Id}");
+                    }
+                }
+                else
+                {
+                    RecoverJob(job);
 
+                    Log.Debug($"HandleInProgressTasks, job recover: {job.Id}");
+                }
+            }
         }
+
         void HandleCancelTasks()
         {
             var jobs = _dataAccessHandler.GetTasksFromStatus(ServiceTaskStatus.Cancel);
@@ -116,7 +180,14 @@ namespace WorkrsBackend
                 TaskInProgress tp;
                 if (_tasks.TryGetValue(job.Id, out tp))
                 {
-                    StopJob(tp.Worker.WorkerId, tp.ServiceTask);
+                    if(tp.Worker != null)
+                        StopJob(tp.Worker.WorkerId, tp.ServiceTask);
+                    else
+                    {
+                        var t = _dataAccessHandler.GetTaskFromId(tp.ServiceTask.Id);
+                        t.Status = ServiceTaskStatus.Canceled;
+                        _dataAccessHandler.UpdateTask(t);
+                    }
                 }
                 else
                 {
@@ -124,7 +195,6 @@ namespace WorkrsBackend
                     _dataAccessHandler.UpdateTask(job);
                 }
             }
-
         }
 
         void ClientRegistrationReceived(object? model, BasicDeliverEventArgs ea)
@@ -279,7 +349,8 @@ namespace WorkrsBackend
                                     }
                             }
                         }
-                        Log.Debug("HandleClientRequest, Headers was set to NULL");
+                        else
+                            Log.Debug("HandleClientRequest, Headers was set to NULL");
                     }
                     else
                         Log.Debug("HandleClientRequest, Unknown client");
@@ -291,7 +362,6 @@ namespace WorkrsBackend
                 }
             });
         }
-
 
         void HandleWorkerRequest(object? model, BasicDeliverEventArgs ea)
         {
@@ -332,34 +402,55 @@ namespace WorkrsBackend
                                 break;
                             case "report":
                                 {
-                                    WorkerReportDTO report = JsonSerializer.Deserialize<WorkerReportDTO>(message);
-                                    Log.Debug($"HandleWorkerRequest_report, Worker: {report.WorkerId}");
-                                    if (w.JobId != report.JobId)
+                                    try
                                     {
-                                        Log.Debug($"HandleWorkerRequest_report, {report.WorkerId}, incorrect task!");
-                                        StopJob(w.WorkerId, _dataAccessHandler.GetTaskFromId(report.JobId));
+                                        WorkerReportDTO report = JsonSerializer.Deserialize<WorkerReportDTO>(message);
+                                        Log.Debug($"HandleWorkerRequest_report, Worker: {report.WorkerId}, serviceTask: {report.JobId}");
+                                        UpdateWorkerKeerpAlive(w);
+                                        if (w.JobId != report.JobId && report.JobId != Guid.Empty)
+                                        {
+                                            Log.Debug($"HandleWorkerRequest_report, {report.WorkerId}, incorrect task!");
+                                            StopJob(w.WorkerId, _dataAccessHandler.GetTaskFromId(report.JobId));
+                                        }
+                                    }
+                                    catch(Exception ex)
+                                    {
+                                        Log.Debug("exception");
                                     }
                                 }
                                 break;
                             case "jobDone":
                                 {
                                     var t = _dataAccessHandler.GetTaskFromId(Guid.Parse(Encoding.UTF8.GetString(ea.Body.ToArray())));
-                                    t.Status = ServiceTaskStatus.Completed;
-                                    _dataAccessHandler.UpdateTask(t);
-                                    Log.Debug($"HandleWorkerRequest_jobDone, task: {t.Id}");
+                                    if(_tasks.ContainsKey(t.Id))
+                                    {
+                                        if(_tasks[t.Id].Worker?.WorkerId == w.WorkerId)
+                                        {
+                                            t.Status = ServiceTaskStatus.Completed;
+                                            if (_tasks.ContainsKey(t.Id))
+                                                _tasks.Remove(t.Id);
+                                            _dataAccessHandler.UpdateTask(t);
+                                            w.Status = WorkerStatus.Available;
+                                            _dataAccessHandler.UpdateWorkerDHT(w);
+                                            Log.Debug($"HandleWorkerRequest_jobDone, task: {t.Id}");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        t.Status = ServiceTaskStatus.Failed;
+                                        _dataAccessHandler.UpdateTask(t);
+                                    }
                                 }
                                 break;
                             case "stopJob":
                                 {
                                     TaskInProgress? tp;
-                                    if (_tasks.TryGetValue(Guid.Parse(Encoding.UTF8.GetString(ea.Body.ToArray())), out tp))
+                                    ResetWorkerAvailable(w);
+                                    if (_tasks.TryGetValue(Guid.Parse(message), out tp))
                                     {
                                         var t = _dataAccessHandler.GetTaskFromId(tp.ServiceTask.Id);
                                         t.Status = ServiceTaskStatus.Canceled;
                                         _dataAccessHandler.UpdateTask(t);
-                                        Worker worker = _dataAccessHandler.GetWorkerById(tp.Worker.WorkerId);
-                                        worker.Status = WorkerStatus.Available;
-                                        _dataAccessHandler.UpdateWorkerDHT(worker);
                                         _tasks.Remove(t.Id);
                                         Log.Debug($"HandleWorkerRequest_stopJob, task: {t.Id}");
                                     }
@@ -391,10 +482,18 @@ namespace WorkrsBackend
 
         void RecoverJob(ServiceTask job)
         {
+
             var worker = _dataAccessHandler.GetAvailableWorker();
+            if (worker == null)
+                return;
+
             worker.Status = WorkerStatus.Busy;
             worker.JobId = job.Id;
             _dataAccessHandler.UpdateWorkerDHT(worker);
+            if (!_tasks.ContainsKey(job.Id))
+                _tasks.Add(job.Id, new TaskInProgress(job, worker));
+            else
+                _tasks[job.Id].Worker = worker;
 
             var props = _rabbitMQHandler.GetBasicProperties();
             props.Headers = new Dictionary<string, object>();
@@ -426,18 +525,32 @@ namespace WorkrsBackend
             }
         }
 
+        void ResetWorkerAvailable(Worker worker)
+        {
+            worker = _dataAccessHandler.GetWorkerById(worker.WorkerId);
+            if(worker != null)
+            {
+                worker.Status = WorkerStatus.Available;
+                worker.JobId = Guid.Empty;
+                _dataAccessHandler.UpdateWorkerDHT(worker);
+            }
+        }
+
         void AddWorker(Guid workerId)
         {
+            Worker worker = null;
             if (!_dataAccessHandler.WorkerExists(workerId))
             {
-                _dataAccessHandler.AddWorkerToWorkerDHT(new Worker(workerId, WorkerStatus.Available, _serverConfig.ServerName));
+                worker = new Worker(workerId, WorkerStatus.Available, _serverConfig.ServerName);
+                _dataAccessHandler.AddWorkerToWorkerDHT(worker);
             }
             else
             {
-                Worker? w = _dataAccessHandler.GetWorkerById(workerId);
-                w.ServerName = _serverConfig.ServerName;
-                _dataAccessHandler.UpdateWorkerDHT(w);
+                worker = _dataAccessHandler.GetWorkerById(workerId);
+                worker.ServerName = _serverConfig.ServerName;
+                _dataAccessHandler.UpdateWorkerDHT(worker);
             }
+            UpdateWorkerKeerpAlive(worker);
             _rabbitMQHandler.Connect(workerId, HandleWorkerRequest);
         }
     }

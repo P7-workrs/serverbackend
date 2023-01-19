@@ -339,6 +339,18 @@ namespace WorkrsBackend.DataHandling
             MakeChange(worker, ChangeType.Worker);
         }
 
+        public List<Worker> GetMyWorkers()
+        {
+            List<Worker> retVal = new List<Worker>();
+            
+            foreach(var keyValuePair in _workersDHT.Where(w => w.Value.ServerName == _serverConfig.ServerName).ToList())
+            {
+                retVal.Add(keyValuePair.Value);
+            }
+
+            return retVal;
+        }
+
         public Dictionary<string, Server> GetPrimaryServers()
         {
             

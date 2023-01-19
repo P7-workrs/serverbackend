@@ -4,7 +4,8 @@
     {
         Available = 0,
         Busy = 1,
-        Done = 2
+        Done = 2,
+        MIA
     }
 
     public class Worker

@@ -2,10 +2,10 @@
 {
     public class WorkerReportDTO
     {
-        public string WorkerId { get; set; }
+        public Guid WorkerId { get; set; }
         public Guid JobId { get; set; }
 
-        public WorkerReportDTO(string workerId, Guid jobId)
+        public WorkerReportDTO(Guid workerId, Guid jobId)
         {
             WorkerId = workerId;
             JobId = jobId;

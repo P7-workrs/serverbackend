@@ -3,7 +3,7 @@
     public class TaskInProgress
     {
         public ServiceTask ServiceTask { get; set; }
-        public Worker Worker { get; set; }
+        public Worker? Worker { get; set; }
 
         public TaskInProgress(ServiceTask serviceTask, Worker worker)
         {

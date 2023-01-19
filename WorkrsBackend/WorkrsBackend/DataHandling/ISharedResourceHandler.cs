@@ -14,6 +14,7 @@ namespace WorkrsBackend.DataHandling
         public void UpdateClientDHT(Client client);
         public void UpdateWorkerDHT(Worker worker);
         public Worker? GetAvailableWorker();
+        public List<Worker> GetMyWorkers();
         public Dictionary<string, Server> GetPrimaryServers();
         public Server? GetServerInfo(string serverName);
         public void AddWorkerToWorkerDHT(Worker worker);
