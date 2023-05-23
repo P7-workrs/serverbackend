@@ -251,7 +251,6 @@ namespace WorkrsBackend.DataHandling
             @"
                     SELECT *
                     FROM serverdht
-                    WHERE mode = 0
                 ";
             using (var reader = command.ExecuteReader())
             {
@@ -308,7 +307,7 @@ namespace WorkrsBackend.DataHandling
             @"
                     UPDATE serverdht
                     SET name = $name, pairServer = $pairServer, mode = $mode
-                    WHERE userId = $clientId
+                    WHERE name = $name
                 ";
 
             command.Parameters.AddWithValue("$name", server.Name);

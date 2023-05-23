@@ -1,14 +1,12 @@
-﻿using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
+﻿using RabbitMQ.Client.Events;
+using Serilog;
 using System.Text;
 using System.Text.Json;
 using WorkrsBackend.Config;
 using WorkrsBackend.DataHandling;
 using WorkrsBackend.DTOs;
 using WorkrsBackend.FTP;
-using Serilog;
 using WorkrsBackend.RabbitMQ;
-using SQLitePCL;
 
 namespace WorkrsBackend
 {
@@ -21,6 +19,10 @@ namespace WorkrsBackend
         Dictionary<Guid, TaskInProgress> _tasks = new();
         Dictionary<Guid, DateTime> _workerKeepAlive = new();
         object _lock = new object();
+        double _mu = 0.001;
+        double _interval = 20;
+        int _seed = 120;
+        
 
         public ServiceLogic(IServerConfig serverConfig, ISharedResourceHandler dataAccessHandler, IRabbitMQHandler rabbitMQHandler)
         {
@@ -56,12 +58,19 @@ namespace WorkrsBackend
 
         void Init()
         {
-            _rabbitMQHandler.CreateClientRegisterConsumer(ClientRegistrationReceived);
-            _rabbitMQHandler.CreateClientConnectConsumer(ClientConnectionReceived);
-            _rabbitMQHandler.CreateWorkerRegisterConsumer(WorkerRegistrationReceived);
-            _rabbitMQHandler.CreateWorkerConnectConsumer(WorkerConnectionReceived);
-            _ftpHandler.Init(_serverConfig.ServerName + ".servicehost", _serverConfig.ServerName + "user", "1234");
-            //_ftpHandler.Init("localhost", "p1user", "1234");
+            if(_serverConfig.Mode == (int)ServerMode.Primary)
+            {
+                _rabbitMQHandler.CreateClientRegisterConsumer(ClientRegistrationReceived);
+                _rabbitMQHandler.CreateClientConnectConsumer(ClientConnectionReceived);
+                _rabbitMQHandler.CreateWorkerRegisterConsumer(WorkerRegistrationReceived);
+                _rabbitMQHandler.CreateWorkerConnectConsumer(WorkerConnectionReceived);
+                _ftpHandler.Init("192.168.1.10", "p1user", "p1user");
+                Client? c = _dataAccessHandler.FindClientByUserName("test");
+                if (c == null)
+                {
+                    _dataAccessHandler.AddClientToClientDHT(new Client(Guid.NewGuid(), "test", "P1", "P1"));
+                }
+            }
         }
 
         bool test = false;
@@ -70,7 +79,6 @@ namespace WorkrsBackend
             _rabbitMQHandler.Update();
             if(test)
             {
-                _dataAccessHandler.AddClientToClientDHT(new Client(Guid.NewGuid(),"test", "P1", "P1"));
                 Client? c =_dataAccessHandler.FindClientByUserName("test");
                 if(c != null)
                 {
@@ -81,7 +89,7 @@ namespace WorkrsBackend
                 }
                 test = false;
             }
-            CheckKeepAliveForWorkers(_dataAccessHandler.GetMyWorkers(), 11);
+            CheckKeepAliveForWorkers(_dataAccessHandler.GetMyWorkers(), 20);
 
             HandleStartTasks();
             HandleInProgressTasks();
@@ -136,6 +144,8 @@ namespace WorkrsBackend
                     _workerKeepAlive.Add(worker.WorkerId, DateTime.UtcNow);
             }
         }
+        
+
 
         void HandleStartTasks()
         {
@@ -247,7 +257,7 @@ namespace WorkrsBackend
             var message = Encoding.UTF8.GetString(body);
             var props = ea.BasicProperties;
 
-            var workerId = Guid.NewGuid();
+            var workerId = Guid.Parse(message);
 
             var replyProps = _rabbitMQHandler.GetBasicProperties();
             replyProps.CorrelationId = props.CorrelationId;
@@ -299,6 +309,15 @@ namespace WorkrsBackend
                                         c.ClientId,
                                         Encoding.UTF8.GetString(ea.Body.ToArray()),
                                         ServiceTaskStatus.Created);
+
+                                        if(ea.BasicProperties.Headers.ContainsKey("mu"))
+                                        {
+                                            _mu = double.Parse(Encoding.UTF8.GetString((byte[])ea.BasicProperties.Headers["mu"]));
+                                            _interval = double.Parse(Encoding.UTF8.GetString((byte[])ea.BasicProperties.Headers["interval"]));
+                                            _seed = int.Parse(Encoding.UTF8.GetString((byte[])ea.BasicProperties.Headers["seed"]));
+                                            _rand = new Random(_seed);
+                                        }
+
                                         string source = $"{c.ClientId}/{t.Id}/source/";
                                         string backup = $"{c.ClientId}/{t.Id}/backup/";
                                         string result = $"{c.ClientId}/{t.Id}/result/";
@@ -432,6 +451,8 @@ namespace WorkrsBackend
                                             _dataAccessHandler.UpdateTask(t);
                                             w.Status = WorkerStatus.Available;
                                             _dataAccessHandler.UpdateWorkerDHT(w);
+                                            props.Headers["type"] = "jobDone";
+                                            _rabbitMQHandler.Publish("worker", "log", props, "");
                                             Log.Debug($"HandleWorkerRequest_jobDone, task: {t.Id}");
                                         }
                                     }
@@ -499,9 +520,15 @@ namespace WorkrsBackend
             props.Headers = new Dictionary<string, object>();
             props.Headers.Add("type", "recoverJob");
 
+            //For the experiment:
+            props.Headers.Add("fail", when_fault(_mu).ToString());
+            props.Headers.Add("interval", _interval.ToString());
+            //var interval = BestCheckpointInterval(_mu, _T, _overhead);
+            //props.Headers.Add("interval", interval);
+
             var message = JsonSerializer.Serialize(job);
             _rabbitMQHandler.Publish("worker", worker.WorkerId.ToString(), props, message);
-            Log.Debug($"RecoverJob sent to worker; {worker.WorkerId}, task: {job.Id}");
+            Log.Debug($"RecoverJob sent to worker; {worker.WorkerId}, task: {job.Id}, fault: {props.Headers["fail"]}");
         }
 
         void StartJob(ServiceTask job)
@@ -519,9 +546,15 @@ namespace WorkrsBackend
                 var props = _rabbitMQHandler.GetBasicProperties();
                 props.Headers = new Dictionary<string, object>();
                 props.Headers.Add("type", "startJob");
+
+
+                //For the experiment:
+                //var interval = BestCheckpointInterval(_mu, _T, _overhead);
+                props.Headers.Add("fail", when_fault(_mu).ToString());
+                props.Headers.Add("interval", _interval.ToString());
                 var message = JsonSerializer.Serialize(job);
                 _rabbitMQHandler.Publish("worker", worker.WorkerId.ToString(), props, message);
-                Log.Debug($"StartJob sent to worker; {worker.WorkerId}, task: {job.Id}");
+                Log.Debug($"StartJob sent to worker; {worker.WorkerId}, task: {job.Id}, fault: {props.Headers["fail"]}");
             }
         }
 
@@ -552,6 +585,58 @@ namespace WorkrsBackend
             }
             UpdateWorkerKeerpAlive(worker);
             _rabbitMQHandler.Connect(workerId, HandleWorkerRequest);
+        }
+
+
+
+        /*------------------------------------------------ For experiments ------------------------------------------------*/
+
+        Random _rand = new Random();
+        //private const double _mu = 0.1; // chance of failure
+        private const double _T = 100; // total expected execution time of script
+        private const double _overhead = 1.05; // total overhead of checkpointing
+
+        public double when_fault(double mu)
+        {
+            double r = _rand.NextDouble();
+            return -Math.Log(r) / mu;
+        }
+
+        public double predict_execute_time2(double mu, double T)
+        {
+            return (Math.Exp(mu * T) - 1) / mu;
+        }
+
+        public int best_number_of_checkpoints(double mu, double T, double overhead)
+        {
+            double best_time = predict_execute_time2(mu, T) + 1;
+            bool work = true;
+            int N = 1;
+            while (work)
+            {
+                double new_time =
+                    N * predict_execute_time2(mu, T / N) +
+                    (N - 1) * overhead;
+                //Console.WriteLine("checkpoints {0,5} predicted execution time {1,8}", N, best_time);
+                if (new_time > best_time)
+                {
+                    work = false;
+                    N--;
+                }
+                else
+                {
+                    best_time = new_time;
+                    N++;
+                }
+            }
+
+            return (N);
+        }
+
+        public double BestCheckpointInterval(double mu, double T, double overhead)
+        {
+            var n = best_number_of_checkpoints((double)mu, (double)T, (double)overhead);
+            return T / (n + 1);
         }
     }
 }

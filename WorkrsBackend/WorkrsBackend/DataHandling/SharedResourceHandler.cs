@@ -6,12 +6,13 @@ using System;
 using System.Text;
 using WorkrsBackend.Config;
 using System.Linq;
+using Serilog;
 
 namespace WorkrsBackend.DataHandling
 {
     public class SharedResourceHandler : ISharedResourceHandler
     {
-        int serverCnt = 1;
+        int serverCnt = 2;
         bool _lockClient = false;
         bool _lockWorker = false;
         bool _lockServer = false;
@@ -30,6 +31,7 @@ namespace WorkrsBackend.DataHandling
         List<Guid> _lockServerIds = new List<Guid>();
         Dictionary<Guid, SharedHashTableChangeDTO> _changeQueue = new Dictionary<Guid, SharedHashTableChangeDTO>();
         Dictionary<Guid, int> _changeQueueCount = new Dictionary<Guid, int>();
+
         public SharedResourceHandler(IDataAccessHandler dataAccessHandler, IRabbitMQHandler rabbitMQHandler, IServerConfig serverConfig)
         {
             _dataAccessHandler = dataAccessHandler;
@@ -51,12 +53,16 @@ namespace WorkrsBackend.DataHandling
             if(!_serverDHT.ContainsKey(_serverConfig.ServerName))
             {
                 CreateServer(new Server(_serverConfig.ServerName, _serverConfig.BackupServer, (ServerMode)_serverConfig.Mode));
+                CreateServer(new Server("p2","b2", ServerMode.Secondary));
+
             }
         }
 
         void HandleChange(object? model, BasicDeliverEventArgs ea)
         {
-            SharedHashTableChangeDTO? change = JsonSerializer.Deserialize<SharedHashTableChangeDTO>(Encoding.UTF8.GetString(ea.Body.ToArray()));
+            var body = Encoding.UTF8.GetString(ea.Body.ToArray());
+            SharedHashTableChangeDTO ? change = JsonSerializer.Deserialize<SharedHashTableChangeDTO>(body);
+            Log.Debug("Handle Change: " + body);
             if(change != null)
             {
                 if (!string.IsNullOrEmpty(change.Change))
@@ -218,9 +224,10 @@ namespace WorkrsBackend.DataHandling
 
         void HandleRequestLock(object? model, BasicDeliverEventArgs ea)
         {
-            RequestLockDTO? rlDTO = JsonSerializer.Deserialize<RequestLockDTO>(Encoding.UTF8.GetString(ea.Body.ToArray()));
+            var body = Encoding.UTF8.GetString(ea.Body.ToArray());
+            RequestLockDTO? rlDTO = JsonSerializer.Deserialize<RequestLockDTO>(body);
             ea.Body = null;
-            
+            Log.Debug("Handle Request Lock" + body);
             if(rlDTO != null)
             {
                 var props = _comHandler.GetBasicProperties();
@@ -277,8 +284,10 @@ namespace WorkrsBackend.DataHandling
 
         void HandleRequestLockReply(object? model, BasicDeliverEventArgs ea)
         {
+            var body = Encoding.UTF8.GetString(ea.Body.ToArray());
             Guid guid = Guid.Parse(ea.BasicProperties.CorrelationId);
-            if(_changeQueueCount.ContainsKey(guid))
+            Log.Debug("Handle Request Lock Reply: " + guid.ToString());
+            if (_changeQueueCount.ContainsKey(guid))
             {
                 _lockChangeQueue.EnterWriteLock();
                 try

@@ -1,5 +1,5 @@
 {
-  "ServerName": "p1",
-  "BackupServer": "b1",
-  "Mode": "0"
+  "ServerName": "p2",
+  "BackupServer": "b2",
+  "Mode": "1"
 }

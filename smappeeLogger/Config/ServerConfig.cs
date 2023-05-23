@@ -6,12 +6,11 @@ namespace WorkrsBackend.Config
     {
         readonly string _serverName = string.Empty;
         readonly string _backupServer = string.Empty;
-        int _mode = 0;
 
         public string ServerName => _serverName;
 
         public string BackupServer => _backupServer;
-        public int Mode { get { return _mode; } set { _mode = value; } }
+        public int Mode { get; set; }
 
         public ServerConfig()
         {
@@ -24,7 +23,6 @@ namespace WorkrsBackend.Config
 
             _serverName = configJson.ServerName;
             _backupServer = configJson.BackupServer;
-            _mode = Int32.Parse(configJson.Mode);
         }
     }
 }

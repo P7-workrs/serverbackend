@@ -47,6 +47,5 @@ namespace WorkrsBackend.FTP
             if(client.IsConnected)
                 client.Disconnect();
         }
-
     }
 }

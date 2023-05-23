@@ -7,7 +7,6 @@ namespace WorkrsBackend.RabbitMQ
 {
     public class RabbitMQHandler : IRabbitMQHandler
     {
-        //public Dictionary<Guid, Client> Clients = new();
         List<Guid> _knownConsumers = new List<Guid>();
 
         readonly IServerConfig _serverConfig;
@@ -30,17 +29,19 @@ namespace WorkrsBackend.RabbitMQ
         void Init()
         {
             //var factory = new ConnectionFactory() { HostName = "localhost" };
-            var factory = new ConnectionFactory() { HostName = "rabbit2.rabbitmq" };
-            factory.UserName = "rabbit2";
-            factory.Password = "rabbit2";
+            var factory = new ConnectionFactory() { HostName = "192.168.1.10" };
+            factory.UserName = "admin";
+            factory.Password = "admin";
             var connection = factory.CreateConnection();
             _channel = connection.CreateModel();
             _channel.BasicQos(0, 1, false);
-
-            _clientRegisterQueueName = _channel.QueueDeclare("ClientRegisterQueue", exclusive: false);
-            _clientConnectQueueName = _channel.QueueDeclare(_serverConfig.ServerName + "_clientConnectQueue", exclusive: false);
-            _workerRegisterQueueName = _channel.QueueDeclare("WorkerRegisterQueue", exclusive: false);
-            _workerConnectQueueName = _channel.QueueDeclare(_serverConfig.ServerName + "_workerConnectQueue", exclusive: false);
+            if(_serverConfig.Mode == (int)ServerMode.Primary)
+            {
+                _clientRegisterQueueName = _channel.QueueDeclare("ClientRegisterQueue", exclusive: false);
+                _clientConnectQueueName = _channel.QueueDeclare(_serverConfig.ServerName + "_clientConnectQueue", exclusive: false);
+                _workerRegisterQueueName = _channel.QueueDeclare("WorkerRegisterQueue", exclusive: false);
+                _workerConnectQueueName = _channel.QueueDeclare(_serverConfig.ServerName + "_workerConnectQueue", exclusive: false);
+            }
             _multicastChangeQueue = _channel.QueueDeclare(_serverConfig.ServerName + "_multicastChanges", exclusive: false);
             _multicastLockRequest = _channel.QueueDeclare(_serverConfig.ServerName + "_multicastLockReq", exclusive: false);
             _multicastLockReply = _channel.QueueDeclare(_serverConfig.ServerName + "_multicastLockReply", exclusive: false);
@@ -49,26 +50,30 @@ namespace WorkrsBackend.RabbitMQ
 
         void CreateExchanges()
         {
-            _channel.ExchangeDeclare(exchange: "client", type: "topic");
-            _channel.ExchangeDeclare(exchange: "server", type: "topic");
+            if (_serverConfig.Mode == (int)ServerMode.Primary)
+            {
+                _channel.ExchangeDeclare(exchange: "client", type: "topic");
+                _channel.ExchangeDeclare(exchange: "server", type: "topic");
+                _channel.ExchangeDeclare(exchange: "worker", type: "topic");
+
+                _channel.QueueBind(queue: _clientRegisterQueueName,
+                                         exchange: "server",
+                                         routingKey: "clientRegister");
+
+                _channel.QueueBind(queue: _clientConnectQueueName,
+                                         exchange: "server",
+                                         routingKey: _serverConfig.ServerName + ".clientConnect");
+
+                _channel.QueueBind(queue: _workerRegisterQueueName,
+                                         exchange: "server",
+                                         routingKey: "workerRegister");
+
+                _channel.QueueBind(queue: _workerConnectQueueName,
+                                         exchange: "server",
+                                         routingKey: _serverConfig.ServerName + ".workerConnect");
+            }
+
             _channel.ExchangeDeclare(exchange: "multicast", type: "direct");
-            _channel.ExchangeDeclare(exchange: "worker", type: "topic");
-
-            _channel.QueueBind(queue: _clientRegisterQueueName,
-                                     exchange: "server",
-                                     routingKey: "clientRegister");
-
-            _channel.QueueBind(queue: _clientConnectQueueName,
-                                     exchange: "server",
-                                     routingKey: _serverConfig.ServerName + ".clientConnect");
-
-            _channel.QueueBind(queue: _workerRegisterQueueName,
-                                     exchange: "server",
-                                     routingKey: "workerRegister");
-
-            _channel.QueueBind(queue: _workerConnectQueueName,
-                                     exchange: "server",
-                                     routingKey: _serverConfig.ServerName + ".workerConnect");
             _channel.QueueBind(queue: _multicastChangeQueue, exchange: "multicast", routingKey: "changes");
             _channel.QueueBind(queue: _multicastLockRequest, exchange: "multicast", routingKey: "requestLock");
         }
